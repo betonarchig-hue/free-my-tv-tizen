@@ -179,15 +179,16 @@ body.sheeted #page { opacity: 0; }
 .cell.focus { transform: scale(1.12); box-shadow: 0 26px 44px var(--lift); z-index: 2; }
 .cell small { display: block; font-size: 17px; font-weight: 500; opacity: 0.7; margin-top: 8px; word-break: break-all; }
 
-#settingsList { position: absolute; left: 360px; top: 210px; width: 1200px; }
-.row { display: flex; align-items: center; height: 76px; padding: 0 34px; margin-bottom: 8px; border-radius: 22px; font-size: 30px;
+#settingsList { position: absolute; left: 360px; top: 200px; width: 1200px; }
+.row { display: flex; align-items: center; height: 68px; padding: 0 34px; margin-bottom: 6px; border-radius: 22px; font-size: 30px;
   font-weight: 500; color: var(--ink); transition: background 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease; }
 .row .v { margin-left: auto; color: var(--dim); font-weight: 500; }
 .row { position: relative; }
 .row .v.opt { position: relative; }
 .row .v.opt::before { content: "‹"; position: absolute; left: -34px; opacity: 0; }
 .row .v.opt::after { content: "›"; position: absolute; right: -26px; opacity: 0; }
-.row .v { margin-right: 26px; }
+.row .v { margin-right: 26px; max-width: 55%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .v.opt { overflow: visible; }
 .row.focus { background: #ffffff; color: #1d1d1f; transform: scale(1.03); box-shadow: 0 16px 36px var(--lift); }
 .row.focus .v { color: #6e6e73; }
 .row.focus .v.opt::before, .row.focus .v.opt::after { opacity: 1; }
@@ -206,7 +207,7 @@ body.sheeted #page { opacity: 0; }
 /* MARK: Toast */
 #toast { position: absolute; left: 50%; top: 40px; max-width: 1200px; transform: translate(-50%, -30px); padding: 20px 36px;
   border-radius: 40px; background: rgba(28, 28, 30, 0.88); color: #f5f5f7; font-size: 28px; font-weight: 500; opacity: 0;
-  transition: opacity 0.3s ease, transform 0.3s ease; white-space: nowrap; }
+  transition: opacity 0.3s ease, transform 0.3s ease; text-align: center; line-height: 38px; }
 #toast.on { opacity: 1; transform: translate(-50%, 0); }
 
 /* MARK: Screensaver */
@@ -434,15 +435,97 @@ var TV = (function () {
     }
   }
 
-  /** Opens an app by its Tizen id. */
-  function launch(id, fail) {
-    if (!id) { if (fail) fail(); return; }
-    if (!isTizen) { console.log("[demo] open", id); return; }
-    try {
-      tizen.application.launch(id, null, function () { if (fail) fail(); });
-    } catch (e) {
-      if (fail) fail();
+  /*
+   * Store ids some apps go by on the TV's own control API (port 8001), used only as a last resort.
+   * The Tizen id from getAppsInfo is always tried first.
+   */
+  var STORE_IDS = {
+    youtube: ["111299001912"],
+    netflix: ["3201907018807", "11101200001"],
+    prime: ["3201910019365"],
+    disney: ["3201901017640"],
+    appletv: ["3201807016597"],
+    spotify: ["3201606009684"]
+  };
+  var lastLaunch = null;
+
+  function keyFor(id) {
+    for (var k in found) if (found[k] === id) return k;
+    return null;
+  }
+
+  /*
+   * Opens an app. Inside TizenBrew's page `tizen.application.launch` can be ignored without an error, so it tries,
+   * in order, until one works: launch → launchAppControl → the TV's local control API (POST :8001). An attempt
+   * counts as done when the page goes to the background (the other app took the screen) or its callback says so.
+   * `done(method)` on success, `fail(details)` when nothing worked.
+   */
+  function launch(id, fail, done) {
+    if (!id) { if (fail) fail("no id"); return; }
+    if (!isTizen) { console.log("[demo] open", id); if (done) done("demo"); return; }
+    var finished = false, tried = [];
+    var storeIds = STORE_IDS[keyFor(id)] || [];
+
+    function ok(method) {
+      if (finished) return;
+      finished = true;
+      document.removeEventListener("visibilitychange", onHide);
+      lastLaunch = method;
+      try { localStorage.setItem("fmt.launchWay", method.split(" ")[0]); } catch (e) { }
+      if (done) done(method);
     }
+    function onHide() { if (document.hidden) ok(tried[tried.length - 1] || "?"); }
+    document.addEventListener("visibilitychange", onHide);
+
+    var steps = [
+      function launchStep(next) {
+        tried.push("launch");
+        tizen.application.launch(id, function () { ok("launch"); }, function (e) { tried.push("launch: " + (e && e.name)); next(); });
+      },
+      function appcontrolStep(next) {
+        tried.push("appcontrol");
+        tizen.application.launchAppControl(
+          new tizen.ApplicationControl("http://tizen.org/appcontrol/operation/default", null, null, null, null),
+          id, function () { ok("appcontrol"); }, function (e) { tried.push("appcontrol: " + (e && e.name)); next(); }, null);
+      },
+      function apiStep(next) { rest(id, next); }
+    ];
+    // The way that worked last time goes first.
+    var pref = null;
+    try { pref = localStorage.getItem("fmt.launchWay"); } catch (e) { }
+    if (pref === "appcontrol") steps = [steps[1], steps[0], steps[2]];
+    else if (pref === "api") steps = [steps[2], steps[0], steps[1]];
+    storeIds.forEach(function (sid) { steps.push(function (next) { rest(sid, next); }); });
+
+    function rest(appId, next) {
+      tried.push("api " + appId);
+      var x = new XMLHttpRequest();
+      x.open("POST", "http://127.0.0.1:8001/api/v2/applications/" + encodeURIComponent(appId), true);
+      x.timeout = 3000;
+      x.onload = function () {
+        if (x.status >= 200 && x.status < 300) ok("api " + appId);
+        else { tried.push("api " + appId + ": HTTP " + x.status); next(); }
+      };
+      x.onerror = x.ontimeout = function () { tried.push("api " + appId + ": no answer"); next(); };
+      x.send();
+    }
+
+    var i = 0;
+    function next() {
+      if (finished) return;
+      if (i >= steps.length) {
+        finished = true;
+        document.removeEventListener("visibilitychange", onHide);
+        if (fail) fail(tried.join(" · "));
+        return;
+      }
+      var step = steps[i++], moved = false;
+      function go() { if (!moved) { moved = true; next(); } }
+      // A call that never answers counts as failed after 2.5 s (unless the app took the screen).
+      setTimeout(function () { if (!finished && !moved) { tried.push("(no answer)"); go(); } }, 2500);
+      try { step(go); } catch (e) { tried.push("error: " + (e && e.message)); go(); }
+    }
+    next();
   }
 
   // Remote keys (Tizen key codes plus the computer's for demo mode).
@@ -471,7 +554,8 @@ var TV = (function () {
     apps: function () { return apps; },
     appId: function (k) { return found[k] || null; },
     has: function (k) { return !!found[k]; },
-    known: function () { return known; }
+    known: function () { return known; },
+    lastLaunch: function () { return lastLaunch; }
   };
 })();
 
@@ -1048,13 +1132,13 @@ window.FMT_DEMO = function () {
 
   // MARK: - Toast
 
-  var toastTimer;
-  function toast(text) {
+  var toastTimer, launchInfo = "";
+  function toast(text, ms) {
     var t = $("toast");
     t.textContent = text;
     t.classList.add("on");
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { t.classList.remove("on"); }, 3500);
+    toastTimer = setTimeout(function () { t.classList.remove("on"); }, ms || 3500);
   }
 
   // MARK: - Texts that change with the language
@@ -1241,7 +1325,12 @@ window.FMT_DEMO = function () {
       return;
     }
     toast(tr("Abrindo " + app.name + "…", "Opening " + app.name + "…"));
-    TV.launch(app.id, function () { toast(tr("Não consegui abrir " + app.name, "Couldn't open " + app.name)); });
+    TV.launch(app.id, function (details) {
+      launchInfo = app.name + ": " + details;
+      toast(tr("Não consegui abrir " + app.name + " (" + details + ")", "Couldn't open " + app.name + " (" + details + ")"), 9000);
+    }, function (method) {
+      launchInfo = app.name + ": " + tr("abriu via ", "opened via ") + method;
+    });
   }
 
   // MARK: - Drawer: weather and prices
@@ -1360,6 +1449,9 @@ window.FMT_DEMO = function () {
       { label: tr("Protetor de tela", "Screensaver"), key: "screensaverMinutes", options: [[5, "5 min"], [10, "10 min"], [30, "30 min"], [0, tr("Desligado", "Off")]] },
       { label: tr("Atualizar recomendações agora", "Refresh picks now"), value: Recs.fetching() ? tr("Buscando…", "Fetching…") : "", enter: function () {
         Recs.refresh(true); HomeData.reload(); toast(tr("Buscando recomendações…", "Fetching picks…")); renderSettings();
+      } },
+      { label: tr("Último app aberto", "Last app opened"), value: launchInfo ? launchInfo.slice(0, 60) : "—", enter: function () {
+        if (launchInfo) toast(launchInfo, 12000);
       } },
       { label: tr("Apps encontrados na TV", "Apps found on the TV"), value: TV.apps().length + (TV.isTizen ? "" : " (demo)"), enter: function () {
         $("settingsSheet").classList.remove("open"); openApps(true);
