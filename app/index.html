@@ -430,8 +430,59 @@ var TV = (function () {
     done(false);
   }
 
+  // MARK: - The helper service (service/service.js), which TizenBrew runs with the TV's API
+
+  var SVC = "http://127.0.0.1:8097";
+  function svcGet(path, timeoutMs, cb) {
+    var x = new XMLHttpRequest();
+    x.open("GET", SVC + path, true);
+    x.timeout = timeoutMs;
+    x.onload = function () {
+      var o = null;
+      try { o = JSON.parse(x.responseText); } catch (e) { }
+      cb(x.status === 200 && o ? null : (o && o.error) || "HTTP " + x.status, o);
+    };
+    x.onerror = function () { cb("offline"); };
+    x.ontimeout = function () { cb("timeout"); };
+    x.send();
+  }
+
+  /** The service starts a moment after the module opens: try for about 6 s. */
+  function svcReady(cb) {
+    var tries = 0;
+    (function ping() {
+      svcGet("/ping", 800, function (err) {
+        if (!err) return cb(true);
+        if (++tries >= 8) return cb(false);
+        setTimeout(ping, 700);
+      });
+    })();
+  }
+
+  function loadFromService(done, fallback) {
+    svcGet("/apps", 6000, function (err, o) {
+      if (err || !o || !o.apps) return fallback();
+      mode = "service";
+      apps = o.apps.filter(function (a) { return a.show !== false && a.name && !HIDDEN.test(a.name); })
+        .map(function (a) { return { id: a.id, name: a.name, icon: a.icon ? SVC + "/icon?id=" + encodeURIComponent(a.id) : "" }; })
+        .sort(function (a, b) { return a.name.localeCompare(b.name); });
+      match(apps);
+      known = true;
+      done(true);
+    });
+  }
+
   /** Reads the TV's apps; `done(ok)` when it's known. */
   function load(done) {
+    if (onTV && !load.triedService) {
+      load.triedService = true;
+      svcReady(function (ok) {
+        if (ok) loadFromService(done, function () { load(done); });
+        else load(done);
+      });
+      return;
+    }
+    if (mode === "service") { loadFromService(done, function () { mode = "tv"; load(done); }); return; }
     if (onTV && !api()) {
       // Wait up to 4 s for the Tizen API before giving up on it.
       var waited = 0;
@@ -523,6 +574,15 @@ var TV = (function () {
     document.addEventListener("visibilitychange", onHide);
 
     var steps = [
+      function serviceStep(next) {
+        tried.push("service");
+        svcGet("/launch?id=" + encodeURIComponent(id), 6000, function (err, o) {
+          if (!err && o && o.ok) {
+            // The app may take a second to take the screen; count it as opened.
+            ok("service " + (o.method || ""));
+          } else { tried.push("service: " + (err || "?")); next(); }
+        });
+      },
       function launchStep(next) {
         tried.push("launch");
         tz.application.launch(id, function () { ok("launch"); }, function (e) { tried.push("launch: " + (e && e.name)); next(); });
@@ -538,9 +598,12 @@ var TV = (function () {
     // The way that worked last time goes first.
     var pref = null;
     try { pref = localStorage.getItem("fmt.launchWay"); } catch (e) { }
-    if (!tz) steps = [steps[2]];                       // no Tizen API: only the TV's control API
-    else if (pref === "appcontrol") steps = [steps[1], steps[0], steps[2]];
-    else if (pref === "api") steps = [steps[2], steps[0], steps[1]];
+    // Order: the helper service when it's running, then the page's own Tizen API, then the TV's control API.
+    var svc = steps[0], launchS = steps[1], acS = steps[2], apiS = steps[3];
+    if (mode === "service") steps = [svc, apiS];
+    else if (!tz) steps = [apiS];
+    else if (pref === "appcontrol") steps = [acS, launchS, apiS];
+    else steps = [launchS, acS, apiS];
     storeIds.forEach(function (sid) { steps.push(function (next) { rest(sid, next); }); });
 
     function rest(appId, next) {
@@ -571,7 +634,7 @@ var TV = (function () {
       var step = steps[i++], moved = false;
       function go() { if (!moved) { moved = true; next(); } }
       // A call that never answers counts as failed after 2.5 s (unless the app took the screen).
-      setTimeout(function () { if (!finished && !moved) { tried.push("(no answer)"); go(); } }, 2500);
+      setTimeout(function () { if (!finished && !moved) { tried.push("(no answer)"); go(); } }, step.name === "serviceStep" ? 7000 : 2500);
       try { step(go); } catch (e) { tried.push("error: " + (e && e.message)); go(); }
     }
     next();
@@ -1521,7 +1584,7 @@ window.FMT_DEMO = function () {
       { label: tr("Último app aberto", "Last app opened"), value: launchInfo ? launchInfo.slice(0, 60) : "—", enter: function () {
         if (launchInfo) toast(launchInfo, 12000);
       } },
-      { label: tr("Apps encontrados na TV", "Apps found on the TV"), value: TV.apps().length + ({ tv: "", "tv-noapi": tr(" (sem API Tizen)", " (no Tizen API)"), demo: " (demo)" })[TV.mode()], enter: function () {
+      { label: tr("Apps encontrados na TV", "Apps found on the TV"), value: TV.apps().length + ({ service: "", tv: "", "tv-noapi": tr(" (lista padrão)", " (default list)"), demo: " (demo)" })[TV.mode()], enter: function () {
         $("settingsSheet").classList.remove("open"); openApps(true);
       } }
     ];
@@ -1536,8 +1599,8 @@ window.FMT_DEMO = function () {
   function renderSettings() {
     settingsRows();
     $("settingsSub").textContent = tr("Free My TV para Samsung", "Free My TV for Samsung") + " · "
-      + ({ tv: tr("TV, comandos Tizen ok", "TV, Tizen API ok"), "tv-noapi": tr("TV, sem comandos Tizen", "TV, no Tizen API"), demo: tr("modo demo (computador)", "demo mode (computer)") })[TV.mode()]
-      + " · v1.2";
+      + ({ service: tr("TV, serviço ok", "TV, service ok"), tv: tr("TV, comandos Tizen ok", "TV, Tizen API ok"), "tv-noapi": tr("TV, sem serviço nem comandos Tizen", "TV, no service or Tizen API"), demo: tr("modo demo (computador)", "demo mode (computer)") })[TV.mode()]
+      + " · v1.3";
     var list = $("settingsList");
     list.innerHTML = "";
     rows.forEach(function (r, i) {
