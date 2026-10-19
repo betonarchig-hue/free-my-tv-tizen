@@ -1,0 +1,14 @@
+{
+  "name": "free-my-tv-tizen",
+  "version": "1.3.0",
+  "description": "A fast, ad-free home screen for Samsung TVs (Tizen), as a TizenBrew module. Port of Free My TV.",
+  "packageType": "app",
+  "appName": "Free My TV",
+  "appPath": "app/index.html",
+  "keys": [],
+  "license": "MIT",
+  "scripts": {
+    "build": "node tools/build.js"
+  },
+  "serviceFile": "service/service.js"
+}
