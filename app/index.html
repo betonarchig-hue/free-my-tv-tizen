@@ -127,6 +127,10 @@ body.night #notice .action { color: #1d1d1f; }
   will-change: transform; }
 .tile.focus { transform: scale(1.2); box-shadow: 0 26px 40px rgba(0, 0, 0, 0.32); z-index: 2; }
 .tile .first { font-size: 64px; font-weight: 700; }
+.tile, .cell { overflow: hidden; }
+.appicon { position: absolute; left: 0; top: 0; width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
+.hasicon .txt { visibility: hidden; }
+.cell.hasicon small { position: relative; z-index: 1; background: rgba(0, 0, 0, 0.6); color: #fff; padding: 2px 8px; border-radius: 8px; }
 #shelfEmpty { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: flex; align-items: center;
   justify-content: center; font-size: 28px; color: var(--dim); }
 
@@ -420,7 +424,7 @@ var TV = (function () {
     try {
       tizen.application.getAppsInfo(function (list) {
         apps = list.filter(function (a) { return a.show !== false && a.name && !HIDDEN.test(a.name); })
-          .map(function (a) { return { id: a.id, name: a.name }; })
+          .map(function (a) { return { id: a.id, name: a.name, icon: a.iconPath || "" }; })
           .sort(function (a, b) { return a.name.localeCompare(b.name); });
         match(apps);
         known = true;
@@ -448,6 +452,17 @@ var TV = (function () {
     spotify: ["3201606009684"]
   };
   var lastLaunch = null;
+
+  /** The app's own icon, as the TV stores it (a file on the TV), or "" when unknown. */
+  function icon(id) {
+    for (var i = 0; i < apps.length; i++) {
+      if (apps[i].id !== id) continue;
+      var p = apps[i].icon;
+      if (!p) return "";
+      return /^[a-z]+:/i.test(p) ? p : "file://" + p;
+    }
+    return "";
+  }
 
   function keyFor(id) {
     for (var k in found) if (found[k] === id) return k;
@@ -555,7 +570,8 @@ var TV = (function () {
     appId: function (k) { return found[k] || null; },
     has: function (k) { return !!found[k]; },
     known: function () { return known; },
-    lastLaunch: function () { return lastLaunch; }
+    lastLaunch: function () { return lastLaunch; },
+    icon: icon
   };
 })();
 
@@ -1121,6 +1137,22 @@ window.FMT_DEMO = function () {
   }
   function icon(name) { return el("i", "ico i-" + name); }
 
+  /**
+   * Puts the app's own icon (installed on the TV with the app) in a tile; the name stays underneath and shows only if
+   * the TV doesn't let the page read the icon.
+   */
+  function appArt(node, id, name) {
+    node.appendChild(el("span", "txt", name));
+    var src = TV.icon(id);
+    if (!src) return;
+    var img = el("img", "appicon");
+    img.alt = "";
+    img.onload = function () { node.classList.add("hasicon"); };
+    img.onerror = function () { if (img.parentNode) img.parentNode.removeChild(img); };
+    img.src = src;
+    node.appendChild(img);
+  }
+
   // MARK: - Fit the 1920×1080 stage to the TV
 
   function fit() {
@@ -1307,7 +1339,7 @@ window.FMT_DEMO = function () {
       t.style.margin = "0 " + gap / 2 + "px";
       t.style.background = "linear-gradient(180deg," + a.colors[0] + "," + a.colors[1] + ")";
       t.style.color = a.colors[2];
-      t.appendChild(document.createTextNode(a.name));
+      appArt(t, a.id, a.name);
       box.appendChild(t);
     });
     if (S.shelf >= shelf.length) S.shelf = Math.max(0, shelf.length - 1);
@@ -1401,7 +1433,8 @@ window.FMT_DEMO = function () {
     grid.forEach(function (a, i) {
       var s = null;
       TV.SERVICES.forEach(function (x) { if (!s && TV.appId(x.key) === a.id) s = x; });
-      var c = el("div", "cell" + (s ? " brand" : ""), a.name);
+      var c = el("div", "cell" + (s ? " brand" : ""));
+      appArt(c, a.id, a.name);
       if (s) {
         c.style.background = "linear-gradient(180deg," + s.colors[0] + "," + s.colors[1] + ")";
         c.style.color = s.colors[2];
